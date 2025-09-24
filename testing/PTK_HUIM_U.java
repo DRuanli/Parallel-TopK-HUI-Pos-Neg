@@ -11,15 +11,7 @@ import java.util.*;
 /**
  * PTK-HUIM-U±: Enhanced Parallel Top-K High-Utility Itemset Mining
  * from Uncertain Databases with Positive and Negative Utilities
- *
- * VERSION 5.2 OPTIMIZED - ULTIMATE HYBRID
- * - CAS-based TopKManager from ver5_2 (maximum parallel performance)
- * - Pre-computed EnhancedUtilityList from ver5_2 (O(1) utility access)
- * - Optimized initialization from ver4_9 (suffix sum preprocessing)
- * - Best algorithmic AND runtime optimizations combined!
- *
- * @author Enhanced Merge
- * @version 5.2-optimized
+
  */
 public class PTK_HUIM_U {
 
