@@ -1,4 +1,4 @@
-package main.ver2.variants;
+package main.ver2;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -11,19 +11,22 @@ import java.io.*;
  * PTK-HUIM-U±: Corrected Parallel Top-K High-Utility Itemset Mining
  * from Uncertain Databases with Positive and Negative Utilities
  *
- * @version 2.1 - EnhancedTransaction modify
+ * MODIFICATION:
+ * 1. đơn giản hóa thuật toán bằng cách loại bỏ việc theo dõi riêng biệt PTU/NTU
+ * 2. thay đổi cách tính RTWU (không nhân với xác suất)
+ * 3. thay đổi Ngưỡng lọc item theo xác suất (exclude minPro * rawDatabase.size())
+ *
+ * @author Elio
+ * @version 2.0
  */
-class ver2_1 {
+public class ver2 {
     private final Map<Integer, Double> itemProfits;
     private final int k;
     private final double minPro;
     private static final double EPSILON = 1e-10;
     private static final double LOG_EPSILON = -700; // exp(-700) ≈ 0
 
-    // Thread-safe top-K management
     private final TopKManager topKManager;
-
-    // Transaction database (kept in memory after single scan)
     private List<EnhancedTransaction> database;
 
     // Item ordering based on RTWU (Redefined TWU for negative utilities)
@@ -42,13 +45,13 @@ class ver2_1 {
     private static final int PARALLEL_THRESHOLD = 10; // Min items for parallel processing
     private static final int TASK_GRANULARITY = 5;   // Items per task for load balancing
 
-    // Memory monitoring
     private final long maxMemory;
     private long peakMemoryUsage = 0;
 
-    /**
-     * Enhanced Transaction class with efficient storage and RTWU ordering
+    /*
+    `* Enhanced Transaction class
      */
+
     static class EnhancedTransaction {
         final int tid;
         final int[] items;           // Sorted by RTWU order
@@ -56,24 +59,16 @@ class ver2_1 {
         final double[] logProbabilities;  // Store log probabilities to prevent underflow
         final double rtu;            // Remaining Transaction Utility (positive only)
 
-        // HashMap for O(1) lookups instead of binary search
-        private final Map<Integer, Integer> itemIndexMap;
-
-        private static final double LOG_EPSILON = -700; // exp(-700) ≈ 0
-
-        // Constructor for initial creation (before RTWU ordering is known)
         EnhancedTransaction(int tid, Map<Integer, Integer> itemMap,
-                        Map<Integer, Double> probMap, Map<Integer, Double> profits) {
+                           Map<Integer, Double> probMap, Map<Integer, Double> profits){
             this.tid = tid;
-
             int size = itemMap.size();
             this.items = new int[size];
             this.quantities = new int[size];
             this.logProbabilities = new double[size];
-            this.itemIndexMap = new HashMap<>(size * 4 / 3); // Avoid rehashing
 
             int idx = 0;
-            double rtu = 0;
+            double rtu = 0; // remove ptu, ntu
 
             // Temporarily store items (will be sorted by RTWU later)
             for (Map.Entry<Integer, Integer> entry : itemMap.entrySet()) {
@@ -85,54 +80,47 @@ class ver2_1 {
                 double prob = probMap.getOrDefault(item, 0.0);
                 logProbabilities[idx] = prob > 0 ? Math.log(prob) : LOG_EPSILON;
 
-                // Build index map
-                itemIndexMap.put(item, idx);
-
-                // Calculate RTU (only positive utilities)
                 Double profit = profits.get(item);
-                if (profit != null && profit > 0) {
-                    rtu += profit * quantities[idx];
+                if (profit != null) {
+                    double utility = profit * quantities[idx];
+                    if (profit > 0) {
+                        rtu += utility;
+                    }
                 }
                 idx++;
             }
 
             this.rtu = rtu;
+
         }
 
-        // Constructor with RTWU ordering - OPTIMIZED
+        // Constructor with RTWU ordering
         EnhancedTransaction(int tid, Map<Integer, Integer> itemMap,
-                        Map<Integer, Double> probMap, Map<Integer, Double> profits,
-                        Map<Integer, Integer> itemToRank) {
+                           Map<Integer, Double> probMap, Map<Integer, Double> profits,
+                           Map<Integer, Integer> itemToRank) {
             this.tid = tid;
 
-            int size = itemMap.size();
+            // Sort items by RTWU rank
+            List<Integer> sortedItems = new ArrayList<>(itemMap.keySet());
+            sortedItems.sort((a, b) -> {
+                Integer rankA = itemToRank.get(a);
+                Integer rankB = itemToRank.get(b);
+                if (rankA == null && rankB == null) return 0;
+                if (rankA == null) return 1;
+                if (rankB == null) return -1;
+                return rankA.compareTo(rankB);
+            });
 
-            // Create item-rank pairs for sorting
-            int[][] itemRankPairs = new int[size][2];
-            int idx = 0;
-            int unrankedCount = 0;
-
-            for (Integer item : itemMap.keySet()) {
-                Integer rank = itemToRank.get(item);
-                itemRankPairs[idx][0] = item;
-                itemRankPairs[idx][1] = (rank != null) ? rank : Integer.MAX_VALUE;
-                if (rank == null) unrankedCount++;
-                idx++;
-            }
-
-            // Sort by rank using primitive array sort (very fast dual-pivot quicksort)
-            Arrays.sort(itemRankPairs, (a, b) -> Integer.compare(a[1], b[1]));
-
-            // Initialize arrays with sorted order
+            // Convert to arrays for efficiency
+            int size = sortedItems.size();
             this.items = new int[size];
             this.quantities = new int[size];
             this.logProbabilities = new double[size];
-            this.itemIndexMap = new HashMap<>(size * 4 / 3);
 
+            int idx = 0;
             double rtu = 0;
 
-            for (idx = 0; idx < size; idx++) {
-                int item = itemRankPairs[idx][0];
+            for (Integer item : sortedItems) {
                 items[idx] = item;
                 quantities[idx] = itemMap.get(item);
 
@@ -140,34 +128,26 @@ class ver2_1 {
                 double prob = probMap.getOrDefault(item, 0.0);
                 logProbabilities[idx] = prob > 0 ? Math.log(prob) : LOG_EPSILON;
 
-                // Build index map for O(1) lookup
-                itemIndexMap.put(item, idx);
-
-                // Calculate RTU (only positive utilities)
                 Double profit = profits.get(item);
-                if (profit != null && profit > 0) {
-                    rtu += profit * quantities[idx];
+                if (profit != null) {
+                    double utility = profit * quantities[idx];
+                    if (profit > 0) {
+                        rtu += utility;
+                    }
                 }
+                idx++;
             }
 
             this.rtu = rtu;
-
-            // Warning if many unranked items (for debugging)
-            if (unrankedCount > size / 2) {
-                System.err.println("Warning: Transaction " + tid + " has " +
-                                unrankedCount + "/" + size + " unranked items");
-            }
         }
 
-        // O(1) lookup methods using HashMap
         int getItemIndex(int item) {
-            Integer idx = itemIndexMap.get(item);
-            return idx != null ? idx : -1;
+            return Arrays.binarySearch(items, item);
         }
 
         double getItemLogProbability(int item) {
-            Integer idx = itemIndexMap.get(item);
-            return idx != null ? logProbabilities[idx] : LOG_EPSILON;
+            int idx = getItemIndex(item);
+            return idx >= 0 ? logProbabilities[idx] : LOG_EPSILON;
         }
 
         double getItemProbability(int item) {
@@ -175,39 +155,17 @@ class ver2_1 {
         }
 
         int getItemQuantity(int item) {
-            Integer idx = itemIndexMap.get(item);
-            return idx != null ? quantities[idx] : 0;
+            int idx = getItemIndex(item);
+            return idx >= 0 ? quantities[idx] : 0;
         }
 
         boolean containsItem(int item) {
-            return itemIndexMap.containsKey(item);
-        }
-
-        // Additional utility methods
-        int getItemCount() {
-            return items.length;
-        }
-
-        // For debugging - verify RTWU ordering
-        boolean isProperlyOrdered(Map<Integer, Integer> itemToRank) {
-            for (int i = 0; i < items.length - 1; i++) {
-                Integer rank1 = itemToRank.get(items[i]);
-                Integer rank2 = itemToRank.get(items[i + 1]);
-                if (rank1 != null && rank2 != null && rank1 > rank2) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        @Override
-        public String toString() {
-            return String.format("T%d: %d items, RTU=%.2f", tid, items.length, rtu);
+            return getItemIndex(item) >= 0;
         }
     }
 
-    /**
-     * Enhanced Utility-List with log-space probability tracking
+    /*
+     * Enhanced Utitlity-List
      */
     static class EnhancedUtilityList {
         static class Element {
@@ -413,7 +371,7 @@ class ver2_1 {
             EnhancedUtilityList extension = extensions.get(index);
 
             // Join to create new utility-list
-            EnhancedUtilityList joined = ver2_1.this.join(prefix, extension);
+            EnhancedUtilityList joined = ver2.this.join(prefix, extension);
 
             if (joined == null || joined.elements.isEmpty()) {
                 return;
@@ -452,9 +410,7 @@ class ver2_1 {
         }
     }
 
-    // ==================== MAIN ALGORITHM ====================
-
-    public ver2_1(Map<Integer, Double> itemProfits, int k, double minPro) {
+    public ver2(Map<Integer, Double> itemProfits, int k, double minPro) {
         this.itemProfits = Collections.unmodifiableMap(new HashMap<>(itemProfits));
         this.k = k;
         this.minPro = minPro;
@@ -1015,18 +971,11 @@ class ver2_1 {
         Map<Integer, Double> profits = readProfitTable(profitFile);
         List<Transaction> database = readDatabase(dbFile);
 
-        System.out.println("=== PTK-HUIM-U± Corrected (Sound, Complete, and PARALLEL) ===");
-        System.out.println("Corrections applied:");
-        System.out.println("1. Fixed RTWU-based item ordering (was incorrectly using item-id)");
-        System.out.println("2. Implemented proper two-pass initialization");
-        System.out.println("3. Removed unproven probability decay pruning");
-        System.out.println("4. Implemented log-space probability computation");
-        System.out.println("5. All pruning strategies are mathematically proven");
-        System.out.println("6. FIXED: Actually uses ForkJoinPool for parallel processing");
+        System.out.println("=== PTK-HUIM-U± ===");
         System.out.println();
 
         // Run corrected algorithm
-        ver2_1 algorithm = new ver2_1(profits, k, minPro);
+        ver2 algorithm = new ver2(profits, k, minPro);
         List<Itemset> topK = algorithm.mine(database);
 
         // Display results
@@ -1086,4 +1035,5 @@ class ver2_1 {
         }
         return database;
     }
+
 }
