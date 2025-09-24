@@ -22,20 +22,20 @@ CONFIG = {
     'java_dir': 'testing',
     'data_dir': 'data',
     'output_dir': 'exp_results',
-    'k_values': [50, 100, 200],
-    'min_prob_values': [0.001, 0.005, 0.01],
-    'timeout': 600,  # seconds
+    'k_values': [5, 50, 100, 500, 1000, 10000],
+    'min_prob_values': [0.00001, 0.005, 0.01, 0.1, 0.5],
+    'timeout': 6000,  # seconds
     'java_heap': '4G',
-    'repetitions': 3  # Run each experiment 3 times
+    'repetitions': 1  # Run each experiment 3 times
 }
 
 # Dataset definitions
 DATASETS = [
-    ('database.txt', 'profits.txt', 'small_test'),
+    # ('database.txt', 'profits.txt', 'small_test'),
     # Add your actual datasets here
-    # ('chess_database.txt', 'chess_profits.txt', 'chess'),
-    # ('mushroom_database.txt', 'mushroom_profits.txt', 'mushroom'),
-    # ('retail_database.txt', 'retail_profits.txt', 'retail'),
+    ('chess_database.txt', 'chess_profits.txt', 'chess'),
+    #('mushroom_database.txt', 'mushroom_profits.txt', 'mushroom'),
+    #('retail_database.txt', 'retail_profits.txt', 'retail'),
 ]
 
 
@@ -90,6 +90,8 @@ class PerformanceTester:
         # Prepare command
         cmd = [
             'java',
+            '-cp',
+            'testing/build',
             f'-Xmx{self.config["java_heap"]}',
             f'-Xms{self.config["java_heap"]}',
             '-XX:+UseG1GC',
@@ -99,6 +101,7 @@ class PerformanceTester:
             str(k),
             str(min_prob)
         ]
+
 
         print(f"Running: {dataset_name}, k={k}, minPro={min_prob}, rep={rep+1}")
 
@@ -260,12 +263,16 @@ class PerformanceTester:
 
         # Compile Java code first
         print("\nCompiling Java code...")
-        compile_cmd = ['javac', '-d', '.', 'testing/**/*.java']
-        compile_result = subprocess.run(compile_cmd, capture_output=True, text=True)
-        if compile_result.returncode != 0:
-            print(f"Compilation failed: {compile_result.stderr}")
-            return
-        print("Compilation successful!")
+        compile_cmd = "javac -d testing/build -cp . $(find testing -name '*.java')"
+        try:
+            # Use shell=True to interpret the $(find...) command substitution
+            # Use check=True to automatically raise an error if compilation fails
+            subprocess.run(compile_cmd, shell=True, check=True, capture_output=True, text=True)
+            print("Compilation successful!")
+        except subprocess.CalledProcessError as e:
+            print("Compilation failed!")
+            print(f"Error: {e.stderr}")
+            return # Exit if compilation fails
 
         # Run experiments
         experiment_count = 0

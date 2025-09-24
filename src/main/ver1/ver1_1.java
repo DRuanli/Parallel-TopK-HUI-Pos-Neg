@@ -1,4 +1,4 @@
-package main.ver1.variant;
+package main.ver1;
 
 import java.util.*;
 import java.util.concurrent.*;

@@ -1,4 +1,4 @@
-package main.ver4;
+package main.ver9;
 
 import java.io.*;
 import java.time.*;
@@ -20,7 +20,7 @@ import java.util.stream.*;
  * @author Elio
  * @version 9
  */
-public class ver4_9 {
+public class ver9 {
     private final Map<Integer, Double> itemProfits;
     private final int k;
     private final double minPro;
@@ -555,7 +555,7 @@ public class ver4_9 {
                 return;
             }
 
-            EnhancedUtilityList joined = ver4_9.this.join(prefix, extension);
+            EnhancedUtilityList joined = ver9.this.join(prefix, extension);
 
             if (joined == null || joined.elements.isEmpty()) {
                 return;
@@ -612,7 +612,7 @@ public class ver4_9 {
     }
 
     // Constructor
-    public ver4_9(Map<Integer, Double> itemProfits, int k, double minPro) {
+    public ver9(Map<Integer, Double> itemProfits, int k, double minPro) {
         this.itemProfits = Collections.unmodifiableMap(new HashMap<>(itemProfits));
         this.k = k;
         this.minPro = minPro;
@@ -1265,7 +1265,7 @@ public class ver4_9 {
         System.out.println("Ultimate hybrid: CAS TopKManager + Pre-computed utilities + Suffix sum optimization");
         System.out.println();
 
-        ver4_9 algorithm = new ver4_9(profits, k, minPro);
+        ver9 algorithm = new ver9(profits, k, minPro);
         List<Itemset> topK = algorithm.mine(database);
 
         System.out.println("\n=== Top-" + k + " PHUIs ===");

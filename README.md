@@ -49,7 +49,7 @@ git clone https://github.com/DRuanli/Parallel-TopK-HUI-Pos-Neg.git
 cd PTK-HUIM-U
 
 # Compile Java sources
-javac -d . testing/**/*.java
+javac -d testing/build -cp . testing/**/*.java
 ```
 
 ## Usage
@@ -58,10 +58,10 @@ javac -d . testing/**/*.java
 
 ```bash
 # Run the main algorithm
-java testing.PTK_HUIM_U <database_file> <profit_file> <k> <min_probability>
+java -cp testing/build testing.PTK_HUIM_U <database_file> <profit_file> <k> <min_probability>
 
 # Example
-java testing.PTK_HUIM_U data/database.txt data/profits.txt 100 0.001
+java -cp testing/build testing.PTK_HUIM_U data/database.txt data/profits.txt 100 0.001
 ```
 
 ### Input Format
