@@ -1,18 +1,18 @@
 import java.io.*;
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
 import java.util.stream.*;
 
 /**
- * PTK-HUIM-U±: Parallel Top-K High-Utility Itemset Mining
+ * PTK-HUIM-U±: Sequential Top-K High-Utility Itemset Mining
  * from Uncertain Databases with Positive and Negative Utilities
  *
+ * This is the sequential version for benchmarking against the parallel implementation.
+ * It follows the exact same workflow and logic as parallel.java but processes sequentially.
  *
  * @author Võ Gia Huy, Lê Đăng Nguyễn
  * @advisor Prof. Nguyễn Chí Thiện
  */
-public class parallel {
+public class sequential {
 
     // ============================================================================
     // CONSTANTS AND CONFIGURATION
@@ -23,9 +23,6 @@ public class parallel {
 
     /** Log-space epsilon to prevent underflow in probability calculations */
     private static final double LOG_EPSILON = -700.0;
-
-    /** Task granularity threshold for parallel decomposition */
-    private static final int TASK_GRANULARITY = 4;
 
     /** Debug mode flags */
     private static boolean DEBUG = false;
@@ -203,7 +200,7 @@ public class parallel {
      * Key Design Principles:
      * 1. Array-based storage for memory efficiency
      * 2. Single-pass aggregate computation during construction
-     * 3. Immutable after construction (thread-safe for parallel access)
+     * 3. Immutable after construction
      */
     static class UPUList {
 
@@ -325,7 +322,7 @@ public class parallel {
          * 1. Copy data into efficient array storage
          * 2. Compute all aggregate statistics (sumEU, sumRemaining, EP)
          *
-         * After construction, all fields are immutable (thread-safe).
+         * After construction, all fields are immutable.
          *
          * @param itemIDs Set of item IDs this list represents
          * @param elements List of per-transaction elements
@@ -436,34 +433,27 @@ public class parallel {
     }
 
     // ============================================================================
-    // LOCK-FREE TOP-K MANAGER
+    // SEQUENTIAL TOP-K MANAGER
     // ============================================================================
 
     /**
-     * TopKManager: Thread-safe manager for maintaining top-k patterns.
+     * TopKManager: Simple sequential manager for maintaining top-k patterns.
      *
-     * Uses Compare-And-Swap (CAS) operations for lock-free concurrent updates,
-     * enabling multiple worker threads to propose updates simultaneously without
-     * blocking each other.
-     *
-     * Thread Safety Strategy:
-     * - AtomicReferenceArray for lock-free slot updates
-     * - AtomicInteger for lock-free size tracking
-     * - AtomicReference for lock-free threshold updates
-     * - Retry mechanism with exponential backoff for conflict resolution
+     * Unlike the parallel version, this uses standard data structures
+     * without thread-safe operations.
      */
     private class TopKManager {
         /** Target number of patterns to maintain */
         private final int k;
 
-        /** Lock-free array storing current top-k patterns */
-        private final AtomicReferenceArray<PatternResult> topKArray;
+        /** Array storing current top-k patterns */
+        private final PatternResult[] topKArray;
 
         /** Current number of patterns stored (0 to k) */
-        private final AtomicInteger size = new AtomicInteger(0);
+        private int size = 0;
 
         /** Current k-th best expected utility (threshold for admission) */
-        private final AtomicReference<Double> threshold = new AtomicReference<>(0.0);
+        private double threshold = 0.0;
 
         /**
          * Constructor for TopKManager
@@ -472,18 +462,16 @@ public class parallel {
          */
         TopKManager(int k) {
             this.k = k;
-            this.topKArray = new AtomicReferenceArray<>(k);
+            this.topKArray = new PatternResult[k];
         }
 
         /**
-         * Attempts to add a pattern to top-k using lock-free CAS operations.
+         * Attempts to add a pattern to top-k.
          *
          * Strategy:
-         * 1. Try to fill empty slots first (fast path)
+         * 1. Try to fill empty slots first
          * 2. Try to update existing duplicates with better utility
          * 3. Try to replace weakest pattern if array is full
-         *
-         * Uses retry mechanism with backoff to handle concurrent conflicts.
          *
          * @param itemIDs Set of item IDs forming this pattern
          * @param eu Expected utility of the pattern
@@ -491,70 +479,51 @@ public class parallel {
          * @return true if successfully added/updated, false otherwise
          */
         boolean tryAdd(Set<Integer> itemIDs, double eu, double ep) {
-            final int MAX_RETRIES = 100;
-
-            for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-                // Strategy 1: Try empty slots first (fastest)
-                for (int i = 0; i < k; i++) {
-                    if (topKArray.compareAndSet(i, null, new PatternResult(itemIDs, eu, ep))) {
-                        size.incrementAndGet();
-                        if (DEBUG_VERBOSE) {
-                            System.err.printf("[VERBOSE] Added to empty slot %d: %s, EU=%.4f\n",
-                                i, itemIDs, eu);
-                        }
-                        updateThreshold();
-                        return true;
+            // Strategy 1: Try empty slots first
+            for (int i = 0; i < k; i++) {
+                if (topKArray[i] == null) {
+                    topKArray[i] = new PatternResult(itemIDs, eu, ep);
+                    size++;
+                    if (DEBUG_VERBOSE) {
+                        System.err.printf("[VERBOSE] Added to empty slot %d: %s, EU=%.4f\n",
+                            i, itemIDs, eu);
                     }
-                }
-
-                // Strategy 2: Update existing duplicate with better utility
-                for (int i = 0; i < k; i++) {
-                    PatternResult existing = topKArray.get(i);
-                    if (existing != null && existing.itemIDs.equals(itemIDs) &&
-                        eu > existing.expectedUtility + EPSILON) {
-                        if (topKArray.compareAndSet(i, existing, new PatternResult(itemIDs, eu, ep))) {
-                            if (DEBUG_VERBOSE) {
-                                System.err.printf("[VERBOSE] Updated duplicate at slot %d: %s, EU %.4f -> %.4f\n",
-                                    i, itemIDs, existing.expectedUtility, eu);
-                            }
-                            updateThreshold();
-                            return true;
-                        }
-                    }
-                }
-
-                // Strategy 3: Replace weakest if array is full
-                if (size.get() >= k) {
-                    int weakestIndex = findMinEUIndex();
-                    PatternResult weakest = topKArray.get(weakestIndex);
-
-                    if (weakest != null && eu > weakest.expectedUtility + EPSILON) {
-                        if (topKArray.compareAndSet(weakestIndex, weakest, new PatternResult(itemIDs, eu, ep))) {
-                            if (DEBUG_VERBOSE) {
-                                System.err.printf("[VERBOSE] Replaced weakest at slot %d: %s (EU=%.4f) with %s (EU=%.4f)\n",
-                                    weakestIndex, weakest.itemIDs, weakest.expectedUtility, itemIDs, eu);
-                            }
-                            updateThreshold();
-                            return true;
-                        }
-                    }
-                }
-
-                // Exponential backoff before retry
-                if (attempt > 10) {
-                    try {
-                        Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return false;
-                    }
+                    updateThreshold();
+                    return true;
                 }
             }
 
-            if (DEBUG) {
-                System.err.printf("[DEBUG] Failed to add after %d attempts: %s\n",
-                    MAX_RETRIES, itemIDs);
+            // Strategy 2: Update existing duplicate with better utility
+            for (int i = 0; i < k; i++) {
+                PatternResult existing = topKArray[i];
+                if (existing != null && existing.itemIDs.equals(itemIDs) &&
+                    eu > existing.expectedUtility + EPSILON) {
+                    topKArray[i] = new PatternResult(itemIDs, eu, ep);
+                    if (DEBUG_VERBOSE) {
+                        System.err.printf("[VERBOSE] Updated duplicate at slot %d: %s, EU %.4f -> %.4f\n",
+                            i, itemIDs, existing.expectedUtility, eu);
+                    }
+                    updateThreshold();
+                    return true;
+                }
             }
+
+            // Strategy 3: Replace weakest if array is full
+            if (size >= k) {
+                int weakestIndex = findMinEUIndex();
+                PatternResult weakest = topKArray[weakestIndex];
+
+                if (weakest != null && eu > weakest.expectedUtility + EPSILON) {
+                    topKArray[weakestIndex] = new PatternResult(itemIDs, eu, ep);
+                    if (DEBUG_VERBOSE) {
+                        System.err.printf("[VERBOSE] Replaced weakest at slot %d: %s (EU=%.4f) with %s (EU=%.4f)\n",
+                            weakestIndex, weakest.itemIDs, weakest.expectedUtility, itemIDs, eu);
+                    }
+                    updateThreshold();
+                    return true;
+                }
+            }
+
             return false;
         }
 
@@ -568,7 +537,7 @@ public class parallel {
             double minEU = Double.MAX_VALUE;
 
             for (int i = 0; i < k; i++) {
-                PatternResult pattern = topKArray.get(i);
+                PatternResult pattern = topKArray[i];
                 if (pattern != null && pattern.expectedUtility < minEU) {
                     minEU = pattern.expectedUtility;
                     minIndex = i;
@@ -579,25 +548,25 @@ public class parallel {
         }
 
         /**
-         * Updates the admission threshold (k-th best EU) atomically.
+         * Updates the admission threshold (k-th best EU).
          * Called after any successful add/update operation.
          */
         private void updateThreshold() {
             double newThreshold = Double.MAX_VALUE;
 
             for (int i = 0; i < k; i++) {
-                PatternResult pattern = topKArray.get(i);
+                PatternResult pattern = topKArray[i];
                 if (pattern != null && pattern.expectedUtility < newThreshold) {
                     newThreshold = pattern.expectedUtility;
                 }
             }
 
             // If array not full yet, threshold remains 0.0
-            if (size.get() < k) {
+            if (size < k) {
                 newThreshold = 0.0;
             }
 
-            threshold.set(newThreshold);
+            threshold = newThreshold;
         }
 
         /**
@@ -606,7 +575,7 @@ public class parallel {
          * @return Current threshold value
          */
         double getThreshold() {
-            return threshold.get();
+            return threshold;
         }
 
         /**
@@ -618,7 +587,7 @@ public class parallel {
             List<PatternResult> result = new ArrayList<>();
 
             for (int i = 0; i < k; i++) {
-                PatternResult pattern = topKArray.get(i);
+                PatternResult pattern = topKArray[i];
                 if (pattern != null) {
                     result.add(pattern);
                 }
@@ -628,103 +597,6 @@ public class parallel {
             result.sort((a, b) -> Double.compare(b.expectedUtility, a.expectedUtility));
 
             return result;
-        }
-    }
-
-    // ============================================================================
-    // PARALLEL MINING TASKS
-    // ============================================================================
-
-    /**
-     * PrefixMiningTask: ForkJoin task for parallel prefix-based mining.
-     *
-     * Divides the search space by prefix items and processes each prefix
-     * independently using work-stealing for dynamic load balancing.
-     */
-    private class PrefixMiningTask extends RecursiveAction {
-        private final List<Integer> sortedItems;
-        private final Map<Integer, UPUList> singleItemLists;
-        private final int start;
-        private final int end;
-
-        /**
-         * Constructor for PrefixMiningTask
-         *
-         * @param sortedItems List of items sorted by PTWU ascending
-         * @param singleItemLists Map from item ID to its UPUList
-         * @param start Start index (inclusive) in sortedItems
-         * @param end End index (exclusive) in sortedItems
-         */
-        PrefixMiningTask(List<Integer> sortedItems, Map<Integer, UPUList> singleItemLists,
-                        int start, int end) {
-            this.sortedItems = sortedItems;
-            this.singleItemLists = singleItemLists;
-            this.start = start;
-            this.end = end;
-        }
-
-        /**
-         * Executes the mining task.
-         *
-         * For small ranges (≤ TASK_GRANULARITY), processes sequentially.
-         * For larger ranges, splits into two subtasks and processes in parallel.
-         */
-        @Override
-        protected void compute() {
-            int size = end - start;
-
-            if (size <= TASK_GRANULARITY) {
-                // Base case: process sequentially
-                for (int i = start; i < end; i++) {
-                    processPrefix(i);
-                }
-            } else {
-                // Recursive case: split into two subtasks
-                int mid = start + size / 2;
-                PrefixMiningTask left = new PrefixMiningTask(sortedItems, singleItemLists, start, mid);
-                PrefixMiningTask right = new PrefixMiningTask(sortedItems, singleItemLists, mid, end);
-
-                invokeAll(left, right);
-            }
-        }
-
-        /**
-         * Processes a single prefix item and explores all its extensions.
-         *
-         * @param index Index of the prefix item in sortedItems
-         */
-        private void processPrefix(int index) {
-            int item = sortedItems.get(index);
-            double currentThreshold = topKManager.getThreshold();
-
-            UPUList itemList = singleItemLists.get(item);
-            if (itemList == null || itemList.isEmpty()) {
-                return;
-            }
-
-            // Early pruning: if PTWU < threshold, skip this prefix
-            if (itemList.ptwu < currentThreshold - EPSILON) {
-                if (DEBUG) {
-                    System.err.printf("[DEBUG] Pruned prefix {%d}: PTWU=%.4f < threshold=%.4f\n",
-                        item, itemList.ptwu, currentThreshold);
-                }
-                return;
-            }
-
-            // Collect extension candidates (items appearing after this one)
-            List<Integer> extensions = new ArrayList<>();
-            for (int j = index + 1; j < sortedItems.size(); j++) {
-                int extItem = sortedItems.get(j);
-                UPUList extList = singleItemLists.get(extItem);
-                if (extList != null && extList.ptwu >= currentThreshold - EPSILON) {
-                    extensions.add(extItem);
-                }
-            }
-
-            // Recursively mine extensions
-            if (!extensions.isEmpty()) {
-                searchEnhanced(itemList, extensions, minPro, singleItemLists);
-            }
         }
     }
 
@@ -747,11 +619,8 @@ public class parallel {
     /** Global item ranking: item ID -> rank (based on PTWU ascending) */
     private Map<Integer, Integer> itemToRank;
 
-    /** ForkJoin pool for parallel execution */
-    private final ForkJoinPool forkJoinPool;
-
     /**
-     * Constructor for parallel mining algorithm
+     * Constructor for sequential mining algorithm
      *
      * @param itemProfits Map from item ID to external utility/profit
      * @param k Number of top patterns to find
@@ -759,7 +628,7 @@ public class parallel {
      * @param debug Enable debug output
      * @param debugVerbose Enable verbose debug output
      */
-    public parallel(Map<Integer, Double> itemProfits, int k, double minPro,
+    public sequential(Map<Integer, Double> itemProfits, int k, double minPro,
                    boolean debug, boolean debugVerbose) {
         this.itemProfits = itemProfits;
         this.k = k;
@@ -769,13 +638,9 @@ public class parallel {
         DEBUG = debug;
         DEBUG_VERBOSE = debugVerbose;
 
-        // Use available processors for parallel execution
-        int parallelism = Runtime.getRuntime().availableProcessors();
-        this.forkJoinPool = new ForkJoinPool(parallelism);
-
         if (DEBUG) {
-            System.err.printf("[DEBUG] Initialized with k=%d, minPro=%.2f, parallelism=%d\n",
-                k, minPro, parallelism);
+            System.err.printf("[DEBUG] Initialized with k=%d, minPro=%.2f (SEQUENTIAL mode)\n",
+                k, minPro);
         }
     }
 
@@ -890,11 +755,10 @@ public class parallel {
             }
         }
 
-        // Phase 4: Parallel prefix mining
-        if (DEBUG) System.err.println("[DEBUG] Phase 4: Parallel mining extensions...");
+        // Phase 4: Sequential prefix mining
+        if (DEBUG) System.err.println("[DEBUG] Phase 4: Sequential mining extensions...");
 
-        PrefixMiningTask rootTask = new PrefixMiningTask(sortedItems, singleItemLists, 0, sortedItems.size());
-        forkJoinPool.invoke(rootTask);
+        mineSequentially(sortedItems, singleItemLists);
 
         long endTime = System.nanoTime();
 
@@ -1007,7 +871,7 @@ public class parallel {
      * 2. Filter items by probability and rank by PTWU
      * 3. Build UPU-lists with suffix sum preprocessing
      * 4. Check single items against top-k
-     * 5. Mine extensions in parallel using ForkJoin
+     * 5. Mine extensions sequentially
      *
      * @param database List of transactions forming the uncertain database
      * @return List of top-k patterns sorted by expected utility (descending)
@@ -1077,11 +941,10 @@ public class parallel {
             }
         }
 
-        // Phase 5: Parallel prefix mining
-        if (DEBUG) System.err.println("[DEBUG] Phase 5: Parallel mining...");
+        // Phase 5: Sequential mining
+        if (DEBUG) System.err.println("[DEBUG] Phase 5: Sequential mining...");
 
-        PrefixMiningTask rootTask = new PrefixMiningTask(sortedItems, singleItemLists, 0, sortedItems.size());
-        forkJoinPool.invoke(rootTask);
+        mineSequentially(sortedItems, singleItemLists);
 
         long endTime = System.nanoTime();
 
@@ -1091,6 +954,48 @@ public class parallel {
         }
 
         return topKManager.getTopK();
+    }
+
+    /**
+     * Sequential mining: processes all prefix items in order without parallelization.
+     *
+     * @param sortedItems List of items sorted by PTWU ascending
+     * @param singleItemLists Map from item ID to its UPUList
+     */
+    private void mineSequentially(List<Integer> sortedItems, Map<Integer, UPUList> singleItemLists) {
+        for (int i = 0; i < sortedItems.size(); i++) {
+            int item = sortedItems.get(i);
+            double currentThreshold = topKManager.getThreshold();
+
+            UPUList itemList = singleItemLists.get(item);
+            if (itemList == null || itemList.isEmpty()) {
+                continue;
+            }
+
+            // Early pruning: if PTWU < threshold, skip this prefix
+            if (itemList.ptwu < currentThreshold - EPSILON) {
+                if (DEBUG) {
+                    System.err.printf("[DEBUG] Pruned prefix {%d}: PTWU=%.4f < threshold=%.4f\n",
+                        item, itemList.ptwu, currentThreshold);
+                }
+                continue;
+            }
+
+            // Collect extension candidates (items appearing after this one)
+            List<Integer> extensions = new ArrayList<>();
+            for (int j = i + 1; j < sortedItems.size(); j++) {
+                int extItem = sortedItems.get(j);
+                UPUList extList = singleItemLists.get(extItem);
+                if (extList != null && extList.ptwu >= currentThreshold - EPSILON) {
+                    extensions.add(extItem);
+                }
+            }
+
+            // Recursively mine extensions
+            if (!extensions.isEmpty()) {
+                searchEnhanced(itemList, extensions, minPro, singleItemLists);
+            }
+        }
     }
 
     /**
@@ -1480,7 +1385,7 @@ public class parallel {
          * @param transaction Transaction to add
          * @return true if batch is full and ready to process, false otherwise
          */
-        synchronized boolean add(Transaction transaction) {
+        boolean add(Transaction transaction) {
             buffer.add(transaction);
             return isFull();
         }
@@ -1499,7 +1404,7 @@ public class parallel {
          *
          * @return List of buffered transactions
          */
-        synchronized List<Transaction> flush() {
+        List<Transaction> flush() {
             List<Transaction> result = new ArrayList<>(buffer);
             buffer.clear();
             return result;
@@ -1774,8 +1679,8 @@ public class parallel {
     /**
      * Main method for running the algorithm.
      *
-     * Usage (Batch mode): java parallel <database_file> <profit_file> <k> <min_probability> [--debug | --debug-verbose]
-     * Usage (Streaming mode): java parallel <database_file> <profit_file> <k> <min_probability> --streaming [batch_size] [--debug | --debug-verbose]
+     * Usage (Batch mode): java sequential <database_file> <profit_file> <k> <min_probability> [--debug | --debug-verbose]
+     * Usage (Streaming mode): java sequential <database_file> <profit_file> <k> <min_probability> --streaming [batch_size] [--debug | --debug-verbose]
      *
      * Arguments:
      * - database_file: Path to uncertain transaction database
@@ -1789,23 +1694,23 @@ public class parallel {
      *
      * Examples:
      *   Batch mode:
-     *     java parallel data.txt profits.txt 10 0.1
-     *     java parallel data.txt profits.txt 10 0.1 --debug
+     *     java sequential data.txt profits.txt 10 0.1
+     *     java sequential data.txt profits.txt 10 0.1 --debug
      *
      *   Streaming mode (default batch size 10000):
-     *     java parallel data.txt profits.txt 10 0.1 --streaming
+     *     java sequential data.txt profits.txt 10 0.1 --streaming
      *
      *   Streaming mode (custom batch size 50000):
-     *     java parallel data.txt profits.txt 10 0.1 --streaming 50000
-     *     java parallel data.txt profits.txt 10 0.1 --streaming 50000 --debug
+     *     java sequential data.txt profits.txt 10 0.1 --streaming 50000
+     *     java sequential data.txt profits.txt 10 0.1 --streaming 50000 --debug
      *
      * @param args Command-line arguments
      * @throws IOException if file operations fail
      */
     public static void main(String[] args) throws IOException {
         if (args.length < 4) {
-            System.err.println("Usage (Batch): parallel <database_file> <profit_file> <k> <min_probability> [--debug | --debug-verbose]");
-            System.err.println("Usage (Streaming): parallel <database_file> <profit_file> <k> <min_probability> --streaming [batch_size] [--debug | --debug-verbose]");
+            System.err.println("Usage (Batch): sequential <database_file> <profit_file> <k> <min_probability> [--debug | --debug-verbose]");
+            System.err.println("Usage (Streaming): sequential <database_file> <profit_file> <k> <min_probability> --streaming [batch_size] [--debug | --debug-verbose]");
             System.exit(1);
         }
 
@@ -1843,7 +1748,7 @@ public class parallel {
         Map<Integer, Double> profits = readProfitTable(profitFile);
 
         // Create algorithm instance
-        parallel algorithm = new parallel(profits, k, minPro, debug, debugVerbose);
+        sequential algorithm = new sequential(profits, k, minPro, debug, debugVerbose);
 
         // Measure memory usage
         Runtime runtime = Runtime.getRuntime();
